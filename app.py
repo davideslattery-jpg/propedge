@@ -73,18 +73,7 @@ DEFAULT_PAYOUTS = pd.DataFrame([
     ["4F", 6.0, 1.5, 0.0], ["5F", 10.0, 2.0, 0.4], ["6F", 25.0, 2.0, 0.4],
 ], columns=["Entry", "All hit", "Miss 1", "Miss 2"])
 
-BOOKMARKLET = (
-    "javascript:(async()=>{const L={NFL:9,CFB:15,MLB:2,WNBA:3,NBA:7,NHL:8};"
-    "const o={data:[],included:[],_fetched_at:new Date().toISOString()};const s=new Set();let n=0;"
-    "for(const[k,id]of Object.entries(L)){try{const r=await fetch('/projections?league_id='+id+"
-    "'&per_page=1000&single_stat=true&game_mode=pickem',{credentials:'include'});if(!r.ok)continue;"
-    "const j=await r.json();for(const p of j.data||[]){(p.attributes=p.attributes||{})._league=k;"
-    "o.data.push(p);n++}for(const i of j.included||[]){const q=i.type+':'+i.id;if(!s.has(q)){s.add(q);"
-    "o.included.push(i)}}}catch(e){}await new Promise(r=>setTimeout(r,700))}"
-    "const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(o)],"
-    "{type:'application/json'}));a.download='prizepicks_board.json';document.body.appendChild(a);"
-    "a.click();alert(n+' PrizePicks props saved')})();"
-)
+BOOKMARKLET = "javascript:(async()=>{const L={NFL:9,CFB:15,MLB:2,WNBA:3,NBA:7,NHL:8};const o={data:[],included:[],_fetched_at:new Date().toISOString()};const s=new Set();const rep=[];const w=z=>new Promise(r=>setTimeout(r,z));for(const[k,id]of Object.entries(L)){let c='';for(let t=0;t<3;t++){try{const r=await fetch('/projections?league_id='+id+'&per_page=1000&single_stat=true&game_mode=pickem',{credentials:'include'});if(!r.ok){c='blocked ('+r.status+')';await w(2000);continue}const j=await r.json();let m=0;for(const p of j.data||[]){(p.attributes=p.attributes||{})._league=k;o.data.push(p);m++}for(const i of j.included||[]){const q=i.type+':'+i.id;if(!s.has(q)){s.add(q);o.included.push(i)}}c=m+' props';break}catch(e){c='error';await w(2000)}}rep.push(k+': '+c);await w(1000)}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(o)],{type:'application/json'}));a.download='prizepicks_board.json';document.body.appendChild(a);a.click();alert('Saved prizepicks_board.json\\n\\n'+rep.join('\\n'))})();"
 
 # ---------------------------------------------------------------- math
 def american_to_prob(a):
