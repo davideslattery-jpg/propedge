@@ -332,6 +332,44 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
     return pd.DataFrame(results), unmapped, notes, remaining, unmatched
 
 
+
+def build_slips(df, tables, one_per_game=True, one_per_player=True, min_prob=0.0):
+    """Best slip of each type. For independent legs, EV rises with every leg's
+    probability, so the top-n eligible picks by probability IS the optimal slip."""
+    pool, used_players, used_games = [], set(), set()
+    for r in df.sort_values("Prob", ascending=False).to_dict("records"):
+        if r["Prob"] / 100 < min_prob:
+            break
+        if one_per_player and r["Player"] in used_players:
+            continue
+        game = (r["League"], r["_start"], frozenset({r["Team"], r["Opp"]} - {""}))
+        if one_per_game and any(game[:2] == g[:2] and (game[2] & g[2]) for g in used_games):
+            continue
+        used_players.add(r["Player"])
+        used_games.add(game)
+        pool.append(r)
+    out = []
+    for name, table in tables.items():
+        n = max(table)
+        if n > len(pool):
+            continue
+        legs = pool[:n]
+        probs = [x["Prob"] / 100 for x in legs]
+        d = hit_distribution(probs)
+        out.append({"slip": name, "n": n, "ev": entry_ev(probs, table) - 1,
+                    "all_hit": math.prod(probs), "cash": sum(d[k] for k in table),
+                    "legs": legs})
+    return sorted(out, key=lambda s: s["ev"], reverse=True), pool
+
+
+def slip_text(s):
+    lines = [f"{s['slip']} - EV {s['ev'] * 100:+.1f}% - all hit {s['all_hit']:.1%}"]
+    for x in s["legs"]:
+        lines.append(f"{x['Player']} ({x['League']}) {x['Pick']} {x['Line']:g} {x['Stat']}"
+                     f"  [{x['Prob']:.1f}%]")
+    return "\n".join(lines)
+
+
 def same_game(a, b):
     return a["League"] == b["League"] and a["_start"] == b["_start"] and \
         bool({a["Team"], a["Opp"]} & {b["Team"], b["Opp"]} - {""})
@@ -497,6 +535,44 @@ def main():
             "Edge": st.column_config.Column("Edge (pts)", help=f"Probability minus {entry} break-even"),
             "Push risk": st.column_config.CheckboxColumn("Whole line", help="Landing exactly on it is a push"),
         })
+
+    st.subheader("Suggested slips")
+    sc1, sc2, sc3 = st.columns([1.2, 1.2, 2])
+    one_game = sc1.toggle("One pick per game", value=True,
+                          help="Same-game legs are correlated, which breaks the EV math.")
+    one_player = sc2.toggle("One pick per player", value=True)
+    floor = sc3.slider("Minimum probability per leg (%)", 50.0, 60.0, float(be[entry] * 100), 0.1)
+    slips, pool = build_slips(df, tables, one_game, one_player, floor / 100)
+    st.caption(f"{len(pool)} eligible picks after filters. "
+               "Legs are the highest-probability eligible picks, which is the best slip of each "
+               "size when legs are independent.")
+    if not slips:
+        st.info("No slip fits those filters. Lower the minimum probability or turn off a filter.")
+    else:
+        pos = [s for s in slips if s["ev"] > 0]
+        if not pos:
+            st.warning("Every slip is negative EV with these picks. The best is still a losing bet "
+                       "on average.")
+        for s in slips[:3]:
+            c = st.container(border=True)
+            h, m = c.columns([2, 3])
+            h.markdown(f"### {s['slip']}")
+            h.metric("Expected return", f"{s['ev'] * 100:+.1f}%")
+            m.write("")
+            m1, m2 = m.columns(2)
+            m1.metric("All hit", f"{s['all_hit']:.1%}")
+            m2.metric("Cashes anything", f"{s['cash']:.1%}")
+            c.dataframe(pd.DataFrame(s["legs"])[["League", "Player", "Pick", "Line", "Stat",
+                                                 "Prob", "Start"]],
+                        hide_index=True, width="stretch")
+            with c.expander("Copy for the PrizePicks app"):
+                st.code(slip_text(s), language=None, wrap_lines=True)
+        with st.expander("All slip types ranked"):
+            st.dataframe(pd.DataFrame([{"Slip": s["slip"], "Legs": s["n"],
+                                        "EV %": round(s["ev"] * 100, 1),
+                                        "All hit %": round(s["all_hit"] * 100, 1),
+                                        "Cashes %": round(s["cash"] * 100, 1)} for s in slips]),
+                         hide_index=True, width="stretch")
 
     st.subheader("Entry builder")
     sel = view.iloc[event.selection.rows] if event.selection.rows else view.iloc[0:0]
