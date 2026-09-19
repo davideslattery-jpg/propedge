@@ -678,21 +678,29 @@ def main():
                 f"break-even · {r['# Books']} book(s) · {r['Basis']}</div></div>", unsafe_allow_html=True)
 
     st.write("")
-    f1, f2, f3, f4 = st.columns([2, 3, 1.3, 1.3])
+    st.caption("These filters drive both the table and the suggested slips below.")
+    f1, f2, f3, f4, f5 = st.columns([2, 2.6, 1.4, 1.3, 1.3])
     fl = f1.multiselect("League", sorted(df["League"].unique()), placeholder="All")
     fs = f2.multiselect("Stat", sorted(df["Stat"].unique()), placeholder="All")
-    plus = f3.toggle("+EV only", value=False)
-    exact_only = f4.toggle("Exact lines only", value=False)
+    upcoming = f3.toggle("Not started yet", value=True,
+                         help="Hides games that have already kicked off since you priced.")
+    plus = f4.toggle("+EV only", value=False)
+    exact_only = f5.toggle("Exact lines only", value=False)
     view = df
     if fl:
         view = view[view["League"].isin(fl)]
     if fs:
         view = view[view["Stat"].isin(fs)]
+    if upcoming:
+        started = pd.to_datetime(view["_start"], utc=True, format="mixed", errors="coerce")
+        view = view[started.isna() | (started > pd.Timestamp.now(tz="UTC"))]
     if plus:
         view = view[view["Edge"] > 0]
     if exact_only:
         view = view[view["Basis"] == "exact"]
     view = view.reset_index(drop=True)
+    if view.empty:
+        st.warning("No props match those filters.")
 
     shown = ["League", "Player", "Stat", "Line", "Pick", "Prob", "Edge", "Book line", "Books",
              "Basis", "Start", "Push risk"]
@@ -715,8 +723,8 @@ def main():
                           help="Same-game legs are correlated, which breaks the EV math.")
     one_player = sc2.toggle("One pick per player", value=True)
     floor = sc3.slider("Minimum probability per leg (%)", 50.0, 60.0, float(be[entry] * 100), 0.1)
-    slips, pool = build_slips(df, tables, one_game, one_player, floor / 100)
-    st.caption(f"{len(pool)} eligible picks after filters. "
+    slips, pool = build_slips(view, tables, one_game, one_player, floor / 100)
+    st.caption(f"{len(pool)} eligible picks from the {len(view)} shown above. "
                "Legs are the highest-probability eligible picks, which is the best slip of each "
                "size when legs are independent.")
     if not slips:
