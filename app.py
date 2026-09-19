@@ -21,6 +21,8 @@ LEAGUES = {
     "NHL":  {"pp_id": 8,  "odds_key": "icehockey_nhl",          "stats": "hockey"},
 }
 PP_ID_TO_LEAGUE = {str(v["pp_id"]): k for k, v in LEAGUES.items()}
+# Pre-ticked on load; every other league stays one click away.
+DEFAULT_LEAGUES = ["NFL", "CFB"]
 
 BOOKS = {"fanduel": "FanDuel", "draftkings": "DraftKings", "betmgm": "BetMGM",
          "williamhill_us": "Caesars", "fanatics": "Fanatics", "betrivers": "BetRivers",
@@ -560,14 +562,18 @@ def main():
     rows, fetched = board_rows(payloads)
     counts = Counter(r["league"] for r in rows)
     if not rows:
-        st.error("No supported props in that board. Re-run the PP Board bookmark.")
+        st.warning("That board has no supported props yet. Run the PP Board bookmark, "
+                   "then click Refresh board.")
+        setup_help(gist_id, gh_token)
         st.stop()
 
     c1, c2 = st.columns([3, 1])
     with c1:
-        leagues = st.multiselect("Leagues to price", [lg for lg in LEAGUES if counts[lg]],
-                                 default=[lg for lg in LEAGUES if counts[lg]],
-                                 format_func=lambda lg: f"{lg} ({counts[lg]})")
+        avail = [lg for lg in LEAGUES if counts[lg]]
+        preset = [lg for lg in DEFAULT_LEAGUES if lg in avail] or avail
+        leagues = st.multiselect("Leagues to price", avail, default=preset,
+                                 format_func=lambda lg: f"{lg} ({counts[lg]})",
+                                 help="Each league costs credits separately. Add or remove freely.")
     with c2:
         st.write("")
         go = st.button("Price the board", type="primary", width="stretch",
