@@ -73,7 +73,13 @@ DEFAULT_PAYOUTS = pd.DataFrame([
     ["4F", 6.0, 1.5, 0.0], ["5F", 10.0, 2.0, 0.4], ["6F", 25.0, 2.0, 0.4],
 ], columns=["Entry", "All hit", "Miss 1", "Miss 2"])
 
-BOOKMARKLET = "javascript:(async()=>{const L={NFL:9,CFB:15,MLB:2,WNBA:3,NBA:7,NHL:8};const o={data:[],included:[],_fetched_at:new Date().toISOString()};const s=new Set();const rep=[];const w=z=>new Promise(r=>setTimeout(r,z));for(const[k,id]of Object.entries(L)){let c='';for(let t=0;t<3;t++){try{const r=await fetch('/projections?league_id='+id+'&per_page=1000&single_stat=true&game_mode=pickem',{credentials:'include'});if(!r.ok){c='blocked ('+r.status+')';await w(2000);continue}const j=await r.json();let m=0;for(const p of j.data||[]){(p.attributes=p.attributes||{})._league=k;o.data.push(p);m++}for(const i of j.included||[]){const q=i.type+':'+i.id;if(!s.has(q)){s.add(q);o.included.push(i)}}c=m+' props';break}catch(e){c='error';await w(2000)}}rep.push(k+': '+c);await w(1000)}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(o)],{type:'application/json'}));a.download='prizepicks_board.json';document.body.appendChild(a);a.click();alert('Saved prizepicks_board.json\\n\\n'+rep.join('\\n'))})();"
+BOOKMARKLET_JS = '(async()=>{const GID=\'__GID__\',TOK=\'__TOK__\';const L={NFL:9,CFB:15,MLB:2,WNBA:3,NBA:7,NHL:8};const props=[],rep=[];const w=z=>new Promise(r=>setTimeout(r,z));for(const[k,id]of Object.entries(L)){let c=\'\';for(let t=0;t<3;t++){try{const r=await fetch(\'/projections?league_id=\'+id+\'&per_page=1000&single_stat=true&game_mode=pickem\',{credentials:\'include\'});if(!r.ok){c=\'blocked (\'+r.status+\')\';await w(2500);continue}const j=await r.json();const P={};for(const i of j.included||[]){if(i.type===\'new_player\'||i.type===\'player\')P[i.id]=i.attributes||{}}let m=0;for(const p of j.data||[]){const a=p.attributes||{};const rel=p.relationships||{};const d=(rel.new_player||{}).data||{};const pl=P[d.id]||{};const n=pl.display_name||pl.name||\'\';if(!n||pl.combo||n.indexOf(\' + \')>=0)continue;if(a.status&&a.status!==\'pre_game\')continue;const ln=parseFloat(a.line_score);if(isNaN(ln))continue;props.push({lg:k,p:n,t:pl.team||\'\',o:a.description||\'\',s:a.stat_type||\'\',l:ln,ot:a.odds_type||\'standard\',st:a.start_time||\'\'});m++}c=m+\' props\';break}catch(e){c=\'error\';await w(2500)}}rep.push(k+\': \'+c);await w(1200)}const body=JSON.stringify({_fetched_at:new Date().toISOString(),_slim:1,props:props});let msg;try{const g=await fetch(\'https://api.github.com/gists/\'+GID,{method:\'PATCH\',headers:{\'Authorization\':\'Bearer \'+TOK,\'Accept\':\'application/vnd.github+json\',\'Content-Type\':\'application/json\'},body:JSON.stringify({files:{\'board.json\':{content:body}}})});if(g.ok){msg=\'Sent to Prop Edge. Click "Refresh board" in the app.\'}else{msg=\'Gist upload failed (\'+g.status+\'). Saved a file instead.\';const a=document.createElement(\'a\');a.href=URL.createObjectURL(new Blob([body],{type:\'application/json\'}));a.download=\'prizepicks_board.json\';document.body.appendChild(a);a.click()}}catch(e){msg=\'Gist upload failed (\'+e.message+\'). Saved a file instead.\';const a=document.createElement(\'a\');a.href=URL.createObjectURL(new Blob([body],{type:\'application/json\'}));a.download=\'prizepicks_board.json\';document.body.appendChild(a);a.click()}alert(msg+\'\\n\\n\'+props.length+\' props total\\n\'+rep.join(\'\\n\'))})();'
+
+
+def bookmarklet(gist_id, token):
+    """Personalised bookmarklet: scrape every league, push a slim board to the gist."""
+    return "javascript:" + BOOKMARKLET_JS.replace("__GID__", gist_id.strip()).replace(
+        "__TOK__", token.strip())
 
 # ---------------------------------------------------------------- math
 def american_to_prob(a):
@@ -155,23 +161,71 @@ def secret(name):
         return None
 
 # ---------------------------------------------------------------- PrizePicks board
-def load_boards(files):
-    data, included, fetched = [], {}, []
-    for f in files:
-        j = json.load(f)
-        data += j.get("data", [])
-        for i in j.get("included", []):
-            included[(i.get("type"), i.get("id"))] = i
-        if j.get("_fetched_at"):
-            fetched.append(parse_time(j["_fetched_at"]))
-    return {"data": data, "included": list(included.values())}, [t for t in fetched if t]
+GIST_API = "https://api.github.com/gists/"
 
 
-def parse_board(payload):
-    players = {i["id"]: i.get("attributes", {}) for i in payload.get("included", [])
+def gist_headers(token):
+    h = {"Accept": "application/vnd.github+json"}
+    if token:
+        h["Authorization"] = "Bearer " + token.strip()
+    return h
+
+
+class BoardError(Exception):
+    pass
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def fetch_gist_board(gist_id, token, nonce):
+    """Pull board.json out of the gist. nonce busts the cache on an explicit refresh."""
+    h = gist_headers(token)
+    r = requests.get(GIST_API + gist_id.strip(), headers=h, timeout=30)
+    if r.status_code == 404:
+        raise BoardError("Gist not found. Check the ID, and add a token if the gist is secret.")
+    if r.status_code in (401, 403):
+        raise BoardError(f"GitHub rejected the token ({r.status_code}). It needs the 'gist' scope.")
+    if r.status_code != 200:
+        raise BoardError(f"GitHub returned {r.status_code}: {r.text[:200]}")
+    files = r.json().get("files") or {}
+    f = files.get("board.json") or next(iter(files.values()), None)
+    if not f:
+        raise BoardError("That gist has no files yet. Click the PP Board bookmark first.")
+    if f.get("truncated") and f.get("raw_url"):
+        raw = requests.get(f["raw_url"], headers=h, timeout=60)
+        if raw.status_code != 200:
+            raise BoardError(f"Could not read the full board ({raw.status_code}).")
+        text = raw.text
+    else:
+        text = f.get("content") or ""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise BoardError("The gist does not contain valid board JSON. Re-run the bookmark.")
+
+
+def rows_from_payload(j):
+    """Accepts the slim board the bookmarklet pushes, or raw PrizePicks JSON:API."""
+    if j.get("_slim"):
+        out = []
+        for x in j.get("props", []):
+            try:
+                line = float(x["l"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            league = x.get("lg")
+            if league not in LEAGUES:
+                continue
+            odds_type = x.get("ot") or "standard"
+            out.append({"league": league, "player": x.get("p", ""), "team": x.get("t", "") or "",
+                        "opp": x.get("o", "") or "", "stat": x.get("s", ""), "line": line,
+                        "odds_type": odds_type, "can_less": odds_type == "standard",
+                        "start_dt": parse_time(x.get("st", ""))})
+        return [r for r in out if r["player"]]
+
+    players = {i["id"]: i.get("attributes", {}) for i in j.get("included", [])
                if i.get("type") in ("new_player", "player")}
-    rows, seen = [], set()
-    for p in payload.get("data", []):
+    rows = []
+    for p in j.get("data", []):
         a = p.get("attributes", {}) or {}
         rel = p.get("relationships", {}) or {}
         pl = players.get(((rel.get("new_player") or {}).get("data") or {}).get("id"), {})
@@ -190,15 +244,28 @@ def parse_board(payload):
         except (KeyError, TypeError, ValueError):
             continue
         odds_type = a.get("odds_type") or "standard"
-        key = (league, name, a.get("stat_type"), line, odds_type)
-        if key in seen:
-            continue  # PrizePicks sometimes lists the same prop twice
-        seen.add(key)
         rows.append({"league": league, "player": name, "team": pl.get("team", "") or "",
                      "opp": a.get("description", "") or "", "stat": a.get("stat_type", ""),
                      "line": line, "odds_type": odds_type, "can_less": odds_type == "standard",
                      "start_dt": parse_time(a.get("start_time", ""))})
     return rows
+
+
+def board_rows(payloads):
+    """Merge one or more board payloads, dropping PrizePicks' duplicate listings."""
+    rows, seen, fetched = [], set(), []
+    for j in payloads:
+        t = parse_time(j.get("_fetched_at", ""))
+        if t:
+            fetched.append(t)
+        for r in rows_from_payload(j):
+            key = (r["league"], r["player"], r["stat"], r["line"], r["odds_type"])
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(r)
+    return rows, fetched
+
 
 # ---------------------------------------------------------------- The Odds API
 class OddsError(Exception):
@@ -390,20 +457,40 @@ div[data-testid="stMetric"] {background: rgba(34,197,94,0.06); border: 1px solid
 """
 
 
-def setup_help():
-    st.subheader("Load the PrizePicks board")
+def setup_help(gist_id, token):
+    st.subheader("One-time setup")
     st.markdown(
-        "PrizePicks blocks servers, so the board comes from your own browser. One-time setup:\n\n"
-        "1. In Chrome, show the bookmarks bar (Ctrl+Shift+B), right-click it, choose **Add page**.\n"
-        "2. Name it **PP Board**, paste the code below as the URL, save.\n\n"
-        "Each time you want fresh lines:\n\n"
-        "1. Open [api.prizepicks.com/projections](https://api.prizepicks.com/projections?league_id=9&per_page=10) "
-        "(solve the captcha if one appears - you should see raw text).\n"
-        "2. Click **PP Board**. It grabs every supported league and downloads `prizepicks_board.json`.\n"
-        "3. Upload that file in the sidebar."
+        "PrizePicks blocks servers, so the board has to come from your own browser. Set this up "
+        "once and after that it is two clicks: the bookmark, then **Refresh board** here.\n\n"
+        "1. Go to [gist.github.com](https://gist.github.com), filename **board.json**, content `{}`, "
+        "then **Create secret gist**. Copy the long ID from the end of its URL.\n"
+        "2. Go to [github.com/settings/tokens](https://github.com/settings/tokens) → "
+        "**Generate new token (classic)**. Tick **only** the `gist` box, generate, copy it.\n"
+        "3. Put both in this app's **Settings → Secrets** (then they are remembered):\n"
+        "```\nGIST_ID = \"your gist id\"\nGITHUB_TOKEN = \"your token\"\n```\n"
+        "4. Paste them below to build your bookmark, then in Chrome press Ctrl+Shift+B, "
+        "right-click the bookmarks bar → **Add page**, name it **PP Board**, and paste the "
+        "generated code as the URL."
     )
-    st.code(BOOKMARKLET, language="javascript", wrap_lines=True)
-    st.caption("Single-league files saved straight from the browser (like nfl.json) also work.")
+    g = st.text_input("Gist ID", value=gist_id or "")
+    t = st.text_input("GitHub token (used only to build the code below - not stored)",
+                      value=token or "", type="password")
+    if g and t:
+        st.caption("Copy this whole thing into the bookmark's URL field:")
+        st.code(bookmarklet(g, t), language=None, wrap_lines=True)
+        st.warning("This code contains your token, so keep the bookmark to yourself. "
+                   "A `gist`-only token can touch nothing but your gists.")
+    else:
+        st.info("Enter both above to generate your bookmark.")
+    st.divider()
+    st.markdown(
+        "**Each time you want fresh lines:** open "
+        "[api.prizepicks.com/projections](https://api.prizepicks.com/projections?league_id=9&per_page=10) "
+        "(solve the captcha if one appears), click **PP Board**, wait for the popup, then come back "
+        "here and click **Refresh board**.\n\n"
+        "If the gist upload ever fails, the bookmark saves a file instead - switch the sidebar to "
+        "**Upload file** and load it that way."
+    )
 
 
 def main():
@@ -421,7 +508,17 @@ def main():
     with st.sidebar:
         st.title("📈 Prop Edge")
         api_key = secret("ODDS_API_KEY") or st.text_input("Odds API key", type="password")
-        uploads = st.file_uploader("PrizePicks board (.json)", type="json", accept_multiple_files=True)
+        gist_id, gh_token = secret("GIST_ID"), secret("GITHUB_TOKEN")
+        source = st.radio("Board source", ["GitHub Gist", "Upload file"], horizontal=True,
+                          index=0 if gist_id else 1,
+                          help="The Gist option needs no downloading or uploading.")
+        uploads = []
+        if source == "GitHub Gist":
+            if st.button("Refresh board", width="stretch"):
+                st.session_state.gist_nonce = st.session_state.get("gist_nonce", 0) + 1
+        else:
+            uploads = st.file_uploader("PrizePicks board (.json)", type="json",
+                                       accept_multiple_files=True)
         books = st.multiselect("Sportsbooks", list(BOOKS), default=DEFAULT_BOOKS, format_func=BOOKS.get,
                                help="Up to 10 books cost the same credits as 1.")
         entry = st.selectbox("Rank against entry", DEFAULT_PAYOUTS["Entry"].tolist(), index=8)
@@ -441,15 +538,29 @@ def main():
     st.caption(f"No-vig sportsbook probability for every PrizePicks prop. "
                f"{entry} break-even: **{be[entry]:.1%}** per leg.")
 
-    if not uploads:
-        setup_help()
-        st.stop()
+    payloads = []
+    if source == "GitHub Gist":
+        if not gist_id:
+            setup_help(gist_id, gh_token)
+            st.stop()
+        try:
+            payloads = [fetch_gist_board(gist_id, gh_token,
+                                         st.session_state.get("gist_nonce", 0))]
+        except BoardError as e:
+            st.error(str(e))
+            with st.expander("Set up the gist board"):
+                setup_help(gist_id, gh_token)
+            st.stop()
+    else:
+        if not uploads:
+            setup_help(gist_id, gh_token)
+            st.stop()
+        payloads = [json.load(f) for f in uploads]
 
-    board, fetched = load_boards(uploads)
-    rows = parse_board(board)
+    rows, fetched = board_rows(payloads)
     counts = Counter(r["league"] for r in rows)
     if not rows:
-        st.error("No supported props found in that file. Make sure it's the raw PrizePicks JSON.")
+        st.error("No supported props in that board. Re-run the PP Board bookmark.")
         st.stop()
 
     c1, c2 = st.columns([3, 1])
@@ -463,8 +574,8 @@ def main():
                        disabled=not (api_key and leagues and books))
     if fetched:
         age = (datetime.now(timezone.utc) - max(fetched)).total_seconds() / 60
-        (st.warning if age > 30 else st.caption)(f"Board saved {age:.0f} min ago"
-                                                  + (" - re-save for current lines." if age > 30 else ""))
+        stale = " - click PP Board again, then Refresh board." if age > 30 else ""
+        (st.warning if age > 30 else st.caption)(f"Board captured {age:.0f} min ago{stale}")
     if not api_key:
         st.info("Add your Odds API key in the sidebar (or in the app's secrets).")
 
@@ -596,6 +707,9 @@ def main():
             st.warning("Same-game picks (outcomes are correlated, so EV above is approximate): "
                        + "; ".join(f"{a} + {b}" for a, b in pairs))
         st.dataframe(sel[["Player", "Stat", "Line", "Pick", "Prob", "Start"]], hide_index=True, width="stretch")
+
+    with st.expander("PP Board bookmark setup"):
+        setup_help(gist_id, gh_token)
 
     with st.expander("Diagnostics"):
         st.write(f"PrizePicks props with no sportsbook match: {st.session_state.unmatched}")
