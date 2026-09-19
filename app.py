@@ -1,5 +1,5 @@
 """Prop Edge - rank PrizePicks props by no-vig sportsbook probability (Streamlit app)."""
-import json, math, re, unicodedata
+import json, math, re, time, unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -177,7 +177,7 @@ class BoardError(Exception):
     pass
 
 
-@st.cache_data(ttl=90, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_gist_board(gist_id, token, nonce):
     """Pull board.json out of the gist. nonce busts the cache on an explicit refresh."""
     h = gist_headers(token)
@@ -274,17 +274,46 @@ class OddsError(Exception):
     pass
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def odds_get(path, params):
-    r = requests.get(ODDS_API + path, params=dict(params), timeout=25)
+def _api_get(path, params):
+    """Uncached transport. Keys starting with _ are cache-busters, not API params."""
+    q = {k: v for k, v in dict(params).items() if not k.startswith("_")}
+    r = requests.get(ODDS_API + path, params=q, timeout=25)
     if r.status_code != 200:
         raise OddsError(f"{r.status_code}: {r.text[:200]}")
     return r.json(), r.headers.get("x-requests-remaining")
 
 
-def fetch_event(sport, event_id, markets, books, api_key):
+@st.cache_data(ttl=3600, show_spinner=False)
+def events_get(sport, api_key):
+    """Cleared by the Refresh board button - that is how new games get discovered.
+    Must NOT route through odds_get, whose long cache would mask new events."""
+    return _api_get(f"/sports/{sport}/events", (("apiKey", api_key),))
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def odds_get(path, params):
+    """Long TTL: these are the calls that cost credits."""
+    return _api_get(path, params)
+
+
+def event_generation(key, max_age_min, force=False):
+    """Bump an event's cache generation only once its odds have aged out.
+
+    Same generation -> odds_get returns from cache, costing no credits.
+    Returns (generation, is_fresh_fetch)."""
+    store = st.session_state.setdefault("ev_fetched", {})
+    gen, ts = store.get(key, (0, 0.0))
+    never = max_age_min == float("inf")
+    if force or (not never and time.time() - ts > max_age_min * 60) or ts == 0.0:
+        store[key] = (gen + 1, time.time())
+        return gen + 1, True
+    return gen, False
+
+
+def fetch_event(sport, event_id, markets, books, api_key, gen):
     path = f"/sports/{sport}/events/{event_id}/odds"
-    base = (("apiKey", api_key), ("oddsFormat", "american"), ("bookmakers", ",".join(books)))
+    base = (("apiKey", api_key), ("oddsFormat", "american"), ("bookmakers", ",".join(books)),
+            ("_gen", gen))
     try:
         return [odds_get(path, base + (("markets", ",".join(markets)),))]
     except OddsError as e:
@@ -325,11 +354,12 @@ def price_pick(row, quotes, method, allow_bounds):
 
 
 def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_key,
-                include_alt, progress):
+                include_alt, progress, max_age_min=60, force=False):
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(hours=hours)
     results, unmapped, notes = [], Counter(), []
     spent_est, remaining, unmatched = 0, None, 0
+    n_fetched, n_reused = 0, 0
     for li, lg in enumerate(leagues):
         sport, smap = LEAGUES[lg]["odds_key"], STAT_MAP[LEAGUES[lg]["stats"]]
         lrows = [r for r in rows if r["league"] == lg and (include_alt or r["odds_type"] == "standard")
@@ -342,7 +372,7 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
             notes.append(f"{lg}: no priceable props starting in the next {hours}h")
             continue
         try:
-            events, rem = odds_get(f"/sports/{sport}/events", (("apiKey", api_key),))
+            events, rem = events_get(sport, api_key)
         except OddsError as e:
             notes.append(f"{lg}: Odds API error {e}")
             continue
@@ -352,18 +382,31 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
             t = parse_time(e.get("commence_time"))
             if t and now < t <= horizon and any(abs((t - s).total_seconds()) <= 900 for s in starts):
                 evs.append(e)  # only games PrizePicks is actually offering
-        est = len(evs) * len(markets)
+        # An event already priced within max_age_min comes back from cache for free,
+        # so only the new or stale ones count against the cap.
+        plan = []
+        for e in evs:
+            gen, is_new = event_generation((sport, e["id"], tuple(markets), tuple(books)),
+                                           max_age_min, force)
+            plan.append((e, gen, is_new))
+        due = [x for x in plan if x[2]]
+        est = len(due) * len(markets)
         if spent_est + est > max_credits:
-            notes.append(f"{lg}: skipped - could cost up to {est} credits (cap {max_credits}). "
-                         f"Raise the cap or shorten the time window.")
+            notes.append(f"{lg}: skipped - {len(due)} game(s) need pricing, up to {est} credits "
+                         f"(cap {max_credits}). Raise the cap or shorten the time window.")
+            for e, _, _ in due:   # undo the bump so they stay due next run
+                st.session_state["ev_fetched"].pop(
+                    (sport, e["id"], tuple(markets), tuple(books)), None)
             continue
         spent_est += est
         quotes = defaultdict(list)
-        for ei, e in enumerate(evs):
-            progress((li + (ei + 1) / max(len(evs), 1)) / len(leagues),
-                     f"{lg}: {e.get('away_team')} @ {e.get('home_team')}")
+        for ei, (e, gen, is_new) in enumerate(plan):
+            n_fetched, n_reused = n_fetched + is_new, n_reused + (not is_new)
+            progress((li + (ei + 1) / max(len(plan), 1)) / len(leagues),
+                     f"{lg}: {e.get('away_team')} @ {e.get('home_team')}"
+                     + ("" if is_new else " (cached)"))
             try:
-                responses = fetch_event(sport, e["id"], markets, books, api_key)
+                responses = fetch_event(sport, e["id"], markets, books, api_key, gen)
             except OddsError as err:
                 notes.append(f"{lg} {e.get('away_team')} @ {e.get('home_team')}: {err}")
                 continue
@@ -398,7 +441,8 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
                 "Type": r["odds_type"], "Start": r["start_dt"].astimezone(LOCAL_TZ).strftime("%a %I:%M %p").replace(" 0", " "),
                 "Push risk": float(r["line"]).is_integer(), "_start": r["start_dt"].isoformat(),
             })
-    return pd.DataFrame(results), unmapped, notes, remaining, unmatched
+    return (pd.DataFrame(results), unmapped, notes, remaining, unmatched,
+            n_fetched, n_reused, spent_est)
 
 
 
@@ -518,6 +562,7 @@ def main():
         if source == "GitHub Gist":
             if st.button("Refresh board", width="stretch"):
                 st.session_state.gist_nonce = st.session_state.get("gist_nonce", 0) + 1
+                events_get.clear()   # also re-discover newly posted games
         else:
             uploads = st.file_uploader("PrizePicks board (.json)", type="json",
                                        accept_multiple_files=True)
@@ -530,6 +575,13 @@ def main():
         include_alt = st.toggle("Include demons / goblins", value=False)
         hours = st.slider("Games starting within (hours)", 1, 96, 36)
         max_credits = st.number_input("Max credits per run", 10, 20000, 400, step=50)
+        auto_stale = st.toggle("Auto re-price aging odds", value=False,
+                               help="Off: a game is priced once and never re-priced unless you "
+                                    "ask. On: it re-prices after the age below.")
+        max_age_min = (st.slider("Re-price a game after (min)", 5, 360, 60, step=5)
+                       if auto_stale else float("inf"))
+        force_all = st.button("Re-price everything now", width="stretch",
+                              help="The only thing that repays for games already priced.")
         with st.expander("Payout table - verify in app"):
             pay_df = st.data_editor(DEFAULT_PAYOUTS, hide_index=True, disabled=["Entry"], key="payouts")
 
@@ -585,14 +637,15 @@ def main():
     if not api_key:
         st.info("Add your Odds API key in the sidebar (or in the app's secrets).")
 
-    if go:
+    if go or force_all:
         bar = st.progress(0.0, text="Pricing...")
-        df, unmapped, notes, remaining, unmatched = run_pricing(
+        df, unmapped, notes, remaining, unmatched, n_new, n_reused, spent = run_pricing(
             rows, leagues, books, method, bounds, hours, max_credits, api_key, include_alt,
-            lambda f, t: bar.progress(min(f, 1.0), text=t))
+            lambda f, t: bar.progress(min(f, 1.0), text=t), max_age_min, force_all)
         bar.empty()
         st.session_state.update(res=df, unmapped=unmapped, notes=notes, remaining=remaining,
-                                unmatched=unmatched, run_at=datetime.now(LOCAL_TZ))
+                                unmatched=unmatched, run_at=datetime.now(LOCAL_TZ),
+                                n_new=n_new, n_reused=n_reused, spent=spent)
 
     if "res" not in st.session_state:
         return
@@ -609,7 +662,10 @@ def main():
     m1.metric("Props priced", len(df))
     m2.metric(f"Above {entry} break-even", int((df["Edge"] > 0).sum()))
     m3.metric("Best probability", f"{df['Prob'].max():.1f}%")
-    m4.metric("Odds API credits left", st.session_state.remaining or "cached")
+    m4.metric("Odds API credits left", st.session_state.remaining or "cached",
+              help=f"~{st.session_state.get('spent', 0)} credits this run. "
+                   f"{st.session_state.get('n_new', 0)} game(s) priced, "
+                   f"{st.session_state.get('n_reused', 0)} reused free.")
 
     top = df[df["Edge"] > 0].head(3)
     if not top.empty:
