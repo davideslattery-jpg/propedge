@@ -177,7 +177,7 @@ class BoardError(Exception):
     pass
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_gist_board(gist_id, token, nonce):
     """Pull board.json out of the gist. nonce busts the cache on an explicit refresh."""
     h = gist_headers(token)
@@ -562,7 +562,8 @@ def main():
         if source == "GitHub Gist":
             if st.button("Refresh board", width="stretch"):
                 st.session_state.gist_nonce = st.session_state.get("gist_nonce", 0) + 1
-                events_get.clear()   # also re-discover newly posted games
+                fetch_gist_board.clear()   # the nonce alone is unreliable - a page reload
+                events_get.clear()         # resets it and re-serves a stale cache entry
         else:
             uploads = st.file_uploader("PrizePicks board (.json)", type="json",
                                        accept_multiple_files=True)
