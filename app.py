@@ -438,6 +438,7 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
                 "Stat": r["stat"], "Line": r["line"], "Pick": side, "Prob": round(prob * 100, 2),
                 "Book line": bline, "Books": ", ".join(BOOKS.get(b, b) for b in bks),
                 "# Books": len(bks), "Basis": basis,
+                "Game": " vs ".join(sorted({r["team"], r["opp"]} - {""})) or "-",
                 "Type": r["odds_type"], "Start": r["start_dt"].astimezone(LOCAL_TZ).strftime("%a %I:%M %p").replace(" 0", " "),
                 "Push risk": float(r["line"]).is_integer(), "_start": r["start_dt"].isoformat(),
             })
@@ -703,12 +704,14 @@ def main():
     if view.empty:
         st.warning("No props match those filters.")
 
-    shown = ["League", "Player", "Stat", "Line", "Pick", "Prob", "Edge", "Book line", "Books",
-             "Basis", "Start", "Push risk"]
+    shown = ["League", "Game", "Player", "Stat", "Line", "Pick", "Prob", "Edge", "Book line",
+             "Books", "Basis", "Start", "Push risk"]
     styled = view[shown].style.map(
         lambda v: f"color: {'#22c55e' if v > 0 else '#ef4444'}; font-weight: 600", subset=["Edge"]
     ).format({"Edge": "{:+.1f}", "Line": "{:g}", "Book line": "{:g}"})
-    st.caption("Tick rows to build an entry below.")
+    st.caption("Tick rows to build an entry below. Sort by **Game** to group same-game props - "
+               "those are correlated, which raises a power play's EV but makes the numbers here "
+               "(which assume independence) wrong.")
     event = st.dataframe(
         styled, hide_index=True, width="stretch", height=520, on_select="rerun",
         selection_mode="multi-row", key="board",
