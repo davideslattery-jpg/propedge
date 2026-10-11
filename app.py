@@ -19,6 +19,11 @@ LEAGUES = {
     "WNBA": {"pp_id": 3,  "odds_key": "basketball_wnba",        "stats": "basketball"},
     "NBA":  {"pp_id": 7,  "odds_key": "basketball_nba",         "stats": "basketball"},
     "NHL":  {"pp_id": 8,  "odds_key": "icehockey_nhl",          "stats": "hockey"},
+    # PrizePicks lists all soccer under one league; The Odds API splits it by competition.
+    # Listing events is free, and only games PrizePicks is offering get priced.
+    "SOCCER": {"pp_id": 82, "odds_key": ["soccer_epl", "soccer_spain_la_liga", "soccer_germany_bundesliga",
+                                          "soccer_italy_serie_a", "soccer_france_ligue_one", "soccer_usa_mls"],
+               "stats": "soccer"},
 }
 PP_ID_TO_LEAGUE = {str(v["pp_id"]): k for k, v in LEAGUES.items()}
 # Pre-ticked on load; every other league stays one click away.
@@ -66,6 +71,11 @@ STAT_MAP = {
         "shotsongoal": "player_shots_on_goal", "goaliesaves": "player_total_saves",
         "blockedshots": "player_blocked_shots", "powerplaypoints": "player_power_play_points",
     },
+    # Goals/assists are yes-only markets at the books (no under side), so they can't be de-vigged.
+    "soccer": {
+        "shots": "player_shots", "shotsontarget": "player_shots_on_target",
+        "shotsongoal": "player_shots_on_target",
+    },
 }
 
 # Verify in the PrizePicks app - payouts vary by state and change.
@@ -75,7 +85,7 @@ DEFAULT_PAYOUTS = pd.DataFrame([
     ["4F", 6.0, 1.5, 0.0], ["5F", 10.0, 2.0, 0.4], ["6F", 25.0, 2.0, 0.4],
 ], columns=["Entry", "All hit", "Miss 1", "Miss 2"])
 
-BOOKMARKLET_JS = '(async()=>{const GID=\'__GID__\',TOK=\'__TOK__\';const L={NFL:9,CFB:15,MLB:2,WNBA:3,NBA:7,NHL:8};const props=[],rep=[];const w=z=>new Promise(r=>setTimeout(r,z));for(const[k,id]of Object.entries(L)){let c=\'\';for(let t=0;t<3;t++){try{const r=await fetch(\'/projections?league_id=\'+id+\'&per_page=1000&single_stat=true&game_mode=pickem\',{credentials:\'include\'});if(!r.ok){c=\'blocked (\'+r.status+\')\';await w(2500);continue}const j=await r.json();const P={};for(const i of j.included||[]){if(i.type===\'new_player\'||i.type===\'player\')P[i.id]=i.attributes||{}}let m=0;for(const p of j.data||[]){const a=p.attributes||{};const rel=p.relationships||{};const d=(rel.new_player||{}).data||{};const pl=P[d.id]||{};const n=pl.display_name||pl.name||\'\';if(!n||pl.combo||n.indexOf(\' + \')>=0)continue;if(a.status&&a.status!==\'pre_game\')continue;const ln=parseFloat(a.line_score);if(isNaN(ln))continue;props.push({lg:k,p:n,t:pl.team||\'\',o:a.description||\'\',s:a.stat_type||\'\',l:ln,ot:a.odds_type||\'standard\',st:a.start_time||\'\'});m++}c=m+\' props\';break}catch(e){c=\'error\';await w(2500)}}rep.push(k+\': \'+c);await w(1200)}const body=JSON.stringify({_fetched_at:new Date().toISOString(),_slim:1,props:props});let msg;try{const g=await fetch(\'https://api.github.com/gists/\'+GID,{method:\'PATCH\',headers:{\'Authorization\':\'Bearer \'+TOK,\'Accept\':\'application/vnd.github+json\',\'Content-Type\':\'application/json\'},body:JSON.stringify({files:{\'board.json\':{content:body}}})});if(g.ok){msg=\'Sent to Prop Edge. Click "Refresh board" in the app.\'}else{msg=\'Gist upload failed (\'+g.status+\'). Saved a file instead.\';const a=document.createElement(\'a\');a.href=URL.createObjectURL(new Blob([body],{type:\'application/json\'}));a.download=\'prizepicks_board.json\';document.body.appendChild(a);a.click()}}catch(e){msg=\'Gist upload failed (\'+e.message+\'). Saved a file instead.\';const a=document.createElement(\'a\');a.href=URL.createObjectURL(new Blob([body],{type:\'application/json\'}));a.download=\'prizepicks_board.json\';document.body.appendChild(a);a.click()}alert(msg+\'\\n\\n\'+props.length+\' props total\\n\'+rep.join(\'\\n\'))})();'
+BOOKMARKLET_JS = '(async()=>{const GID=\'__GID__\',TOK=\'__TOK__\';const L={NFL:9,CFB:15,MLB:2,WNBA:3,NBA:7,NHL:8,SOCCER:82};const props=[],rep=[];const w=z=>new Promise(r=>setTimeout(r,z));for(const[k,id]of Object.entries(L)){let c=\'\';for(let t=0;t<3;t++){try{const r=await fetch(\'/projections?league_id=\'+id+\'&per_page=1000&single_stat=true&game_mode=pickem\',{credentials:\'include\'});if(!r.ok){c=\'blocked (\'+r.status+\')\';await w(2500);continue}const j=await r.json();const P={};for(const i of j.included||[]){if(i.type===\'new_player\'||i.type===\'player\')P[i.id]=i.attributes||{}}let m=0;for(const p of j.data||[]){const a=p.attributes||{};const rel=p.relationships||{};const d=(rel.new_player||{}).data||{};const pl=P[d.id]||{};const n=pl.display_name||pl.name||\'\';if(!n||pl.combo||n.indexOf(\' + \')>=0)continue;if(a.status&&a.status!==\'pre_game\')continue;const ln=parseFloat(a.line_score);if(isNaN(ln))continue;props.push({lg:k,p:n,t:pl.team||\'\',o:a.description||\'\',s:a.stat_type||\'\',l:ln,ot:a.odds_type||\'standard\',st:a.start_time||\'\'});m++}c=m+\' props\';break}catch(e){c=\'error\';await w(2500)}}rep.push(k+\': \'+c);await w(1200)}const body=JSON.stringify({_fetched_at:new Date().toISOString(),_slim:1,props:props});let msg;try{const g=await fetch(\'https://api.github.com/gists/\'+GID,{method:\'PATCH\',headers:{\'Authorization\':\'Bearer \'+TOK,\'Accept\':\'application/vnd.github+json\',\'Content-Type\':\'application/json\'},body:JSON.stringify({files:{\'board.json\':{content:body}}})});if(g.ok){msg=\'Sent to Prop Edge. Click "Refresh board" in the app.\'}else{msg=\'Gist upload failed (\'+g.status+\'). Saved a file instead.\';const a=document.createElement(\'a\');a.href=URL.createObjectURL(new Blob([body],{type:\'application/json\'}));a.download=\'prizepicks_board.json\';document.body.appendChild(a);a.click()}}catch(e){msg=\'Gist upload failed (\'+e.message+\'). Saved a file instead.\';const a=document.createElement(\'a\');a.href=URL.createObjectURL(new Blob([body],{type:\'application/json\'}));a.download=\'prizepicks_board.json\';document.body.appendChild(a);a.click()}alert(msg+\'\\n\\n\'+props.length+\' props total\\n\'+rep.join(\'\\n\'))})();'
 
 
 def bookmarklet(gist_id, token):
@@ -361,7 +371,9 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
     spent_est, remaining, unmatched = 0, None, 0
     n_fetched, n_reused = 0, 0
     for li, lg in enumerate(leagues):
-        sport, smap = LEAGUES[lg]["odds_key"], STAT_MAP[LEAGUES[lg]["stats"]]
+        sports = LEAGUES[lg]["odds_key"]
+        sports = [sports] if isinstance(sports, str) else list(sports)
+        smap = STAT_MAP[LEAGUES[lg]["stats"]]
         lrows = [r for r in rows if r["league"] == lg and (include_alt or r["odds_type"] == "standard")
                  and r["start_dt"] and now < r["start_dt"] <= horizon]
         for r in lrows:
@@ -371,36 +383,49 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
         if not markets:
             notes.append(f"{lg}: no priceable props starting in the next {hours}h")
             continue
-        try:
-            events, rem = events_get(sport, api_key)
-        except OddsError as e:
-            notes.append(f"{lg}: Odds API error {e}")
-            continue
         starts = {r["start_dt"] for r in lrows}
-        evs = []
-        for e in events:
-            t = parse_time(e.get("commence_time"))
-            if t and now < t <= horizon and any(abs((t - s).total_seconds()) <= 900 for s in starts):
-                evs.append(e)  # only games PrizePicks is actually offering
+        evs = []   # (sport_key, event)
+        for sport in sports:
+            try:
+                events, rem = events_get(sport, api_key)
+            except OddsError as e:
+                notes.append(f"{lg} {sport}: Odds API error {e}")
+                continue
+            for e in events:
+                t = parse_time(e.get("commence_time"))
+                if t and now < t <= horizon and any(abs((t - s_).total_seconds()) <= 900 for s_ in starts):
+                    evs.append((sport, e))  # only games PrizePicks is actually offering
+        if len(sports) > 1 and evs:
+            # Many soccer games kick off together; keep those whose team names appear on the board.
+            names = {norm_name(x) for r in lrows for x in (r["team"], r["opp"]) if x}
+            def _hit(e):
+                for team in (e.get("home_team", ""), e.get("away_team", "")):
+                    nt = norm_name(team)
+                    if any(n and (n in nt or nt in n) for n in names):
+                        return True
+                return False
+            named = [x for x in evs if _hit(x[1])]
+            if named:
+                evs = named
         # An event already priced within max_age_min comes back from cache for free,
         # so only the new or stale ones count against the cap.
         plan = []
-        for e in evs:
+        for sport, e in evs:
             gen, is_new = event_generation((sport, e["id"], tuple(markets), tuple(books)),
                                            max_age_min, force)
-            plan.append((e, gen, is_new))
-        due = [x for x in plan if x[2]]
+            plan.append((sport, e, gen, is_new))
+        due = [x for x in plan if x[3]]
         est = len(due) * len(markets)
         if spent_est + est > max_credits:
             notes.append(f"{lg}: skipped - {len(due)} game(s) need pricing, up to {est} credits "
                          f"(cap {max_credits}). Raise the cap or shorten the time window.")
-            for e, _, _ in due:   # undo the bump so they stay due next run
+            for sport, e, _, _ in due:   # undo the bump so they stay due next run
                 st.session_state["ev_fetched"].pop(
                     (sport, e["id"], tuple(markets), tuple(books)), None)
             continue
         spent_est += est
         quotes = defaultdict(list)
-        for ei, (e, gen, is_new) in enumerate(plan):
+        for ei, (sport, e, gen, is_new) in enumerate(plan):
             n_fetched, n_reused = n_fetched + is_new, n_reused + (not is_new)
             progress((li + (ei + 1) / max(len(plan), 1)) / len(leagues),
                      f"{lg}: {e.get('away_team')} @ {e.get('home_team')}"
