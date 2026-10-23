@@ -78,6 +78,16 @@ STAT_MAP = {
     },
 }
 
+# Lean mode: football is priced on QB passing markets only. Credits are charged per
+# market per game, so fewer markets is what saves credits (not fewer players).
+QB_MARKETS = {
+    "player_pass_yds": "Pass Yards", "player_pass_tds": "Pass TDs",
+    "player_pass_completions": "Pass Completions", "player_pass_attempts": "Pass Attempts",
+    "player_pass_interceptions": "Interceptions",
+}
+QB_DEFAULT = ["player_pass_yds", "player_pass_tds", "player_pass_completions",
+              "player_pass_attempts"]
+
 # Verify in the PrizePicks app - payouts vary by state and change.
 DEFAULT_PAYOUTS = pd.DataFrame([
     ["2P", 3.0, 0.0, 0.0], ["3P", 6.0, 0.0, 0.0], ["4P", 10.0, 0.0, 0.0],
@@ -364,7 +374,7 @@ def price_pick(row, quotes, method, allow_bounds):
 
 
 def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_key,
-                include_alt, progress, max_age_min=60, force=False):
+                include_alt, progress, max_age_min=60, force=False, lean_markets=None):
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(hours=hours)
     results, unmapped, notes = [], Counter(), []
@@ -376,6 +386,8 @@ def run_pricing(rows, leagues, books, method, bounds, hours, max_credits, api_ke
         smap = STAT_MAP[LEAGUES[lg]["stats"]]
         lrows = [r for r in rows if r["league"] == lg and (include_alt or r["odds_type"] == "standard")
                  and r["start_dt"] and now < r["start_dt"] <= horizon]
+        if lean_markets is not None and LEAGUES[lg]["stats"] == "football":
+            lrows = [r for r in lrows if smap.get(norm_stat(r["stat"])) in lean_markets]
         for r in lrows:
             if norm_stat(r["stat"]) not in smap:
                 unmapped[f"{lg}: {r['stat']}"] += 1
@@ -601,6 +613,14 @@ def main():
         bounds = st.toggle("Use nearby book lines as floors", value=True)
         include_alt = st.toggle("Include demons / goblins", value=False)
         hours = st.slider("Games starting within (hours)", 1, 96, 36)
+        lean = st.toggle("Lean mode: QBs only (NFL/CFB)", value=True,
+                         help="Prices only QB passing props. Cost is about 1 credit per market "
+                              "per game, so an NFL Sunday with 4 markets is ~52 credits.")
+        lean_markets = None
+        if lean:
+            lean_markets = set(st.multiselect("QB markets", list(QB_MARKETS), default=QB_DEFAULT,
+                                              format_func=QB_MARKETS.get,
+                                              help="Each one adds ~1 credit per game."))
         max_credits = st.number_input("Max credits per run", 10, 20000, 400, step=50)
         auto_stale = st.toggle("Auto re-price aging odds", value=False,
                                help="Off: a game is priced once and never re-priced unless you "
@@ -668,7 +688,7 @@ def main():
         bar = st.progress(0.0, text="Pricing...")
         df, unmapped, notes, remaining, unmatched, n_new, n_reused, spent = run_pricing(
             rows, leagues, books, method, bounds, hours, max_credits, api_key, include_alt,
-            lambda f, t: bar.progress(min(f, 1.0), text=t), max_age_min, force_all)
+            lambda f, t: bar.progress(min(f, 1.0), text=t), max_age_min, force_all, lean_markets)
         bar.empty()
         st.session_state.update(res=df, unmapped=unmapped, notes=notes, remaining=remaining,
                                 unmatched=unmatched, run_at=datetime.now(LOCAL_TZ),
